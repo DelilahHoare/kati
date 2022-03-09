@@ -29,6 +29,7 @@
 
 using namespace std;
 
+struct DepNode;
 class Makefile;
 class Rule;
 class Var;
@@ -128,6 +129,8 @@ class Evaluator {
   bool Start();
   void Finish();
 
+  void ExportEnvVars(const vector<Symbol>& envvars);
+
   void EvalAssign(const AssignStmt* stmt);
   void EvalRule(const RuleStmt* stmt);
   void EvalCommand(const CommandStmt* stmt);
@@ -219,6 +222,16 @@ class Evaluator {
   bool IsEvaluatingCommand() const;
   void SetEvaluatingCommand(bool evaluating_command);
 
+  const vector<Symbol>& makefiles() const {
+    return makefiles_;
+  }
+
+  const vector<Symbol>& optional_makefiles() const {
+    return optional_makefiles_;
+  }
+
+  DepNode* current_dep_node = nullptr;
+
  private:
   Var* EvalRHS(Symbol lhs,
                Value* rhs,
@@ -226,7 +239,7 @@ class Evaluator {
                AssignOp op,
                bool is_override,
                bool* needs_assign);
-  void DoInclude(const string& fname);
+  void DoInclude(const string& fname, bool should_exist);
 
   void TraceVariableLookup(const char* operation, Symbol name, Var* var);
   Var* LookupVarGlobal(Symbol name);
@@ -285,6 +298,10 @@ class Evaluator {
   static SymbolSet used_undefined_vars_;
 
   bool is_evaluating_command_ = false;
+
+  bool second_expansion_ = false;
+
+  vector<Symbol> makefiles_, optional_makefiles_;
 };
 
 #endif  // EVAL_H_

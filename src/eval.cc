@@ -159,7 +159,8 @@ Evaluator::Evaluator()
       eval_depth_(0),
       posix_sym_(Intern(".POSIX")),
       is_posix_(false),
-      export_error_(false) {
+      export_error_(false),
+      makefiles_({Intern(g_flags.makefile)}) {
 #if defined(__APPLE__)
   stack_size_ = pthread_get_stacksize_np(pthread_self());
   stack_addr_ = (char*)pthread_get_stackaddr_np(pthread_self()) - stack_size_;
@@ -233,6 +234,12 @@ void Evaluator::in_command_line() {
 void Evaluator::in_toplevel_makefile() {
   is_commandline_ = false;
   is_commandline_ = false;
+}
+
+void Evaluator::ExportEnvVars(const vector<Symbol>& envvars) {
+  for (Symbol var : envvars) {
+    exports_[var] = true;
+  }
 }
 
 Var* Evaluator::EvalRHS(Symbol lhs,
@@ -474,6 +481,12 @@ void Evaluator::EvalRule(const RuleStmt* stmt) {
   bool is_pattern_rule;
   StringPiece after_targets =
       ParseRuleTargets(loc_, before_term, &targets, &is_pattern_rule);
+  for (const auto& t : targets) {
+    if (t.str() == ".SECONDEXPANSION") {
+      second_expansion_ = true;
+      break;
+    }
+  }
   bool is_double_colon = (after_targets[0] == ':');
   if (is_double_colon) {
     after_targets = after_targets.substr(1);
@@ -510,6 +523,7 @@ void Evaluator::EvalRule(const RuleStmt* stmt) {
   Rule* rule = new Rule();
   rule->loc = loc_;
   rule->is_double_colon = is_double_colon;
+  rule->second_expansion = second_expansion_;
   if (is_pattern_rule) {
     rule->output_patterns.swap(targets);
   } else {
@@ -605,25 +619,28 @@ void Evaluator::EvalIf(const IfStmt* stmt) {
   }
 }
 
-void Evaluator::DoInclude(const string& fname) {
+void Evaluator::DoInclude(const string& fname, bool should_exist) {
   CheckStack();
   COLLECT_STATS_WITH_SLOW_REPORT("included makefiles", fname.c_str());
 
   const Makefile& mk = MakefileCacheManager::Get().ReadMakefile(fname);
-  if (!mk.Exists()) {
-    Error(StringPrintf("%s does not exist", fname.c_str()));
-  }
+
+  Symbol fsym = Intern(TrimLeadingCurdir(fname));
+  (should_exist ? makefiles_ : optional_makefiles_).push_back(fsym);
 
   Var* var_list = LookupVar(Intern("MAKEFILE_LIST"));
   var_list->AppendVar(
-      this, Value::NewLiteral(Intern(TrimLeadingCurdir(fname)).str()));
-  for (Stmt* stmt : mk.stmts()) {
-    LOG("%s", stmt->DebugString().c_str());
-    stmt->Eval(this);
-  }
+      this, Value::NewLiteral(fsym.str()));
 
-  for (auto& mk : profiled_files_) {
-    stats.MarkInteresting(mk);
+  if (mk.Exists()) {
+    for (Stmt* stmt : mk.stmts()) {
+      LOG("%s", stmt->DebugString().c_str());
+      stmt->Eval(this);
+    }
+
+    for (auto& mk : profiled_files_) {
+      stats.MarkInteresting(mk);
+    }
   }
   profiled_files_.clear();
 }
@@ -635,13 +652,11 @@ void Evaluator::EvalInclude(const IncludeStmt* stmt) {
   const string&& pats = stmt->expr->Eval(this);
   for (StringPiece pat : WordScanner(pats)) {
     ScopedTerminator st(pat);
-    const auto& files = Glob(pat.data());
+    auto files = Glob(pat.data());
 
-    if (stmt->should_exist) {
-      if (files.empty()) {
-        // TODO: Kati does not support building a missing include file.
-        Error(StringPrintf("%s: %s", pat.data(), strerror(errno)));
-      }
+    if (files.empty()) {
+      // Glob matched no files so use it as a literal name.
+      files.push_back(pat.data());
     }
 
     include_stack_.push_back(stmt->loc());
@@ -654,7 +669,7 @@ void Evaluator::EvalInclude(const IncludeStmt* stmt) {
 
       {
         ScopedFrame frame(Enter(FrameType::PARSE, fname, stmt->loc()));
-        DoInclude(fname);
+        DoInclude(fname, stmt->should_exist);
       }
     }
     include_stack_.pop_back();

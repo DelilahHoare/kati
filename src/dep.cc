@@ -212,17 +212,22 @@ struct RuleMerger {
     rules.push_back(r);
   }
 
-  void FillDepNodeFromRule(Symbol output, const Rule* r, DepNode* n) const {
-    if (is_double_colon)
-      copy(r->cmds.begin(), r->cmds.end(), back_inserter(n->cmds));
+  void FillDepNodeFromRule(Symbol output, const Rule* rule_unparsed, DepNode* n, Evaluator* ev) const {
+    Rule r(*rule_unparsed);
+    ev->current_dep_node = n;
+    r.ParseInputs(ev);
+    ev->current_dep_node = nullptr;
 
-    ApplyOutputPattern(*r, output, r->inputs, &n->actual_inputs);
-    ApplyOutputPattern(*r, output, r->order_only_inputs,
+    if (is_double_colon)
+      copy(r.cmds.begin(), r.cmds.end(), back_inserter(n->cmds));
+
+    ApplyOutputPattern(r, output, r.inputs, &n->actual_inputs);
+    ApplyOutputPattern(r, output, r.order_only_inputs,
                        &n->actual_order_only_inputs);
 
-    if (r->output_patterns.size() >= 1) {
-      CHECK(r->output_patterns.size() == 1);
-      n->output_pattern = r->output_patterns[0];
+    if (r.output_patterns.size() >= 1) {
+      CHECK(r.output_patterns.size() == 1);
+      n->output_pattern = r.output_patterns[0];
     }
   }
 
@@ -232,14 +237,14 @@ struct RuleMerger {
       n->loc.lineno = r->cmd_lineno;
   }
 
-  void FillDepNode(Symbol output, const Rule* pattern_rule, DepNode* n) const {
+  void FillDepNode(Symbol output, const Rule* pattern_rule, DepNode* n, Evaluator* ev) const {
     if (primary_rule) {
       CHECK(!pattern_rule);
-      FillDepNodeFromRule(output, primary_rule, n);
+      FillDepNodeFromRule(output, primary_rule, n, ev);
       FillDepNodeLoc(primary_rule, n);
       n->cmds = primary_rule->cmds;
     } else if (pattern_rule) {
-      FillDepNodeFromRule(output, pattern_rule, n);
+      FillDepNodeFromRule(output, pattern_rule, n, ev);
       FillDepNodeLoc(pattern_rule, n);
       n->cmds = pattern_rule->cmds;
     }
@@ -247,7 +252,7 @@ struct RuleMerger {
     for (const Rule* r : rules) {
       if (r == primary_rule)
         continue;
-      FillDepNodeFromRule(output, r, n);
+      FillDepNodeFromRule(output, r, n, ev);
       if (n->loc.filename == NULL)
         n->loc = r->loc;
     }
@@ -259,7 +264,7 @@ struct RuleMerger {
       n->implicit_outputs.push_back(implicit_output.first);
       all_outputs.insert(implicit_output.first);
       for (const Rule* r : implicit_output.second->rules) {
-        FillDepNodeFromRule(output, r, n);
+        FillDepNodeFromRule(output, r, n, ev);
       }
     }
 
@@ -338,7 +343,6 @@ class DepBuilder {
                                                        ".PRECIOUS",
                                                        ".INTERMEDIATE",
                                                        ".SECONDARY",
-                                                       ".SECONDEXPANSION",
                                                        ".IGNORE",
                                                        ".LOW_RESOLUTION_TIME",
                                                        ".SILENT",
@@ -398,8 +402,11 @@ class DepBuilder {
 
  private:
   bool Exists(Symbol target) {
-    return (rules_.find(target) != rules_.end()) || phony_.exists(target) ||
-           ::Exists(target.str());
+    if ((rules_.find(target) != rules_.end()) || phony_.exists(target) ||
+           ::Exists(target.str())) {
+             return true;
+    }
+    return BuildPlan(target, Intern("(Exists)"))->has_rule; // fixme
   }
 
   bool GetRuleInputs(Symbol s, vector<Symbol>* o, Loc* l) {
@@ -410,8 +417,10 @@ class DepBuilder {
     o->clear();
     CHECK(!found->second.rules.empty());
     *l = found->second.rules.front()->loc;
-    for (const Rule* r : found->second.rules) {
-      for (Symbol i : r->inputs)
+    for (const Rule* rule_unparsed : found->second.rules) {
+      Rule r(*rule_unparsed);
+      r.ParseInputs(ev_);
+      for (Symbol i : r.inputs)
         o->push_back(i);
     }
     return true;
@@ -553,18 +562,34 @@ class DepBuilder {
                            DepNode* n,
                            shared_ptr<Rule>* out_rule) {
     Symbol matched;
+    shared_ptr<Rule> applied;
     for (Symbol output_pattern : rule->output_patterns) {
       Pattern pat(output_pattern.str());
       if (pat.Match(output.str())) {
+        if (rule_stack_.size() != 0 && rule_stack_.back() == rule) {
+          // TODO: This is probably not correct.
+          // It's basically a hack to get around the linux kernel
+          // rule like `%: %_shipped`, which would keep trying to
+          // make the `%_shipped` file with itself, so
+          // `%_shipped_shipped` and so on.  So this prevents any
+          // pattern rule from being able to make a direct input with
+          // itself.
+          // I don't know how gnu make handles this situation.
+          continue;
+        }
+        rule_stack_.push_back(rule);
+        applied = rule->ApplyPattern(pat, output);
+        ev_->current_dep_node = n;
+        applied->ParseInputs(ev_);
+        ev_->current_dep_node = nullptr;
         bool ok = true;
-        for (Symbol input : rule->inputs) {
-          string buf;
-          pat.AppendSubst(output.str(), input.str(), &buf);
-          if (!Exists(Intern(buf))) {
+        for (Symbol input : applied->inputs) {
+          if (!Exists(input)) {
             ok = false;
             break;
           }
         }
+        rule_stack_.pop_back();
 
         if (ok) {
           matched = output_pattern;
@@ -575,7 +600,7 @@ class DepBuilder {
     if (!matched.IsValid())
       return false;
 
-    *out_rule = make_shared<Rule>(*rule);
+    *out_rule = applied;
     if ((*out_rule)->output_patterns.size() > 1) {
       // We should mark all other output patterns as used.
       Pattern pat(matched.str());
@@ -698,9 +723,9 @@ class DepBuilder {
     }
 
     if (rule_merger)
-      rule_merger->FillDepNode(output, pattern_rule.get(), n);
+      rule_merger->FillDepNode(output, pattern_rule.get(), n, ev_);
     else
-      RuleMerger().FillDepNode(output, pattern_rule.get(), n);
+      RuleMerger().FillDepNode(output, pattern_rule.get(), n, ev_);
 
     vector<unique_ptr<ScopedVar>> sv;
     ScopedFrame frame(ev_->Enter(FrameType::DEPENDENCY, output.str(), n->loc));
@@ -940,6 +965,8 @@ class DepBuilder {
   Symbol symlink_outputs_var_name_;
   Symbol ninja_pool_var_name_;
   Symbol validations_var_name_;
+
+  vector<const Rule*> rule_stack_;
 };
 
 void MakeDep(Evaluator* ev,

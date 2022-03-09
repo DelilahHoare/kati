@@ -186,7 +186,7 @@ void Flags::Parse(int argc, char** argv) {
     } else if (ParseCommandLineOptionWithArg("--default_pool", argv, &i,
                                              &default_pool)) {
     } else if (arg[0] == '-') {
-      ERROR("Unknown flag: %s", arg);
+      WARN("Unknown flag: %s", arg);
     } else {
       if (strchr(arg, '=')) {
         cl_vars.push_back(arg);

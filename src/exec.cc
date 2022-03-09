@@ -49,7 +49,7 @@ class Executor {
     shellflag_ = ev->GetShellFlag();
   }
 
-  double ExecNode(const DepNode& n, const char* needed_by) {
+  double ExecNode(const DepNode& n, const char* needed_by, bool ignore_failure) {
     auto found = done_.find(n.output);
     if (found != done_.end()) {
       if (found->second == kProcessing) {
@@ -67,7 +67,7 @@ class Executor {
     LOG("ExecNode: %s for %s", n.output.c_str(),
         needed_by ? needed_by : "(null)");
 
-    if (!n.has_rule && output_ts == kNotExist && !n.is_phony) {
+    if (!n.has_rule && output_ts == kNotExist && !n.is_phony && !ignore_failure) {
       if (needed_by) {
         ERROR("*** No rule to make target '%s', needed by '%s'.",
               n.output.c_str(), needed_by);
@@ -81,13 +81,13 @@ class Executor {
       if (Exists(d.second->output.str())) {
         continue;
       }
-      double ts = ExecNode(*d.second, n.output.c_str());
+      double ts = ExecNode(*d.second, n.output.c_str(), ignore_failure);
       if (latest < ts)
         latest = ts;
     }
 
     for (auto const& d : n.deps) {
-      double ts = ExecNode(*d.second, n.output.c_str());
+      double ts = ExecNode(*d.second, n.output.c_str(), ignore_failure);
       if (latest < ts)
         latest = ts;
     }
@@ -122,6 +122,9 @@ class Executor {
       }
     }
 
+    struct timespec output_tv;
+    clock_gettime(CLOCK_REALTIME, &output_tv);
+    output_ts = output_tv.tv_sec + output_tv.tv_nsec * 0.001 * 0.001 * 0.001;
     done_[n.output] = output_ts;
     return output_ts;
   }
@@ -138,14 +141,10 @@ class Executor {
 
 }  // namespace
 
-void Exec(const vector<NamedDepNode>& roots, Evaluator* ev) {
+bool Exec(const vector<NamedDepNode>& roots, Evaluator* ev, bool ignore_failure) {
   Executor executor(ev);
   for (auto const& root : roots) {
-    executor.ExecNode(*root.second, nullptr);
+    executor.ExecNode(*root.second, nullptr, ignore_failure);
   }
-  if (executor.Count() == 0) {
-    for (auto const& root : roots) {
-      printf("kati: Nothing to be done for `%s'.\n", root.first.c_str());
-    }
-  }
+  return executor.Count() != 0;
 }

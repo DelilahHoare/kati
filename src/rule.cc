@@ -16,14 +16,17 @@
 
 #include "rule.h"
 
+#include "dep.h"
+#include "eval.h"
 #include "expr.h"
+#include "fileutil.h"
 #include "log.h"
 #include "parser.h"
 #include "stringprintf.h"
 #include "strutil.h"
 #include "symtab.h"
 
-Rule::Rule() : is_double_colon(false), is_suffix_rule(false), cmd_lineno(0) {}
+Rule::Rule() : is_double_colon(false), is_suffix_rule(false), parsed_inputs(false), cmd_lineno(0) {}
 
 void Rule::ParseInputs(const StringPiece& inputs_str) {
   bool is_order_only = false;
@@ -32,9 +35,31 @@ void Rule::ParseInputs(const StringPiece& inputs_str) {
       is_order_only = true;
       continue;
     }
-    Symbol input_sym = Intern(TrimLeadingCurdir(input));
-    (is_order_only ? order_only_inputs : inputs).push_back(input_sym);
+    vector<string> input_files;
+    if (!g_flags.generate_ninja) {
+      // TODO: Support in ninja mode
+      input_files = Glob(input.as_string().c_str());
+    }
+    if (input_files.size() == 0) {
+      input_files.push_back(input.as_string());
+    }
+    for (string input_file : input_files) {
+      Symbol input_sym = Intern(TrimLeadingCurdir(input_file));
+      (is_order_only ? order_only_inputs : inputs).push_back(input_sym);
+    }
   }
+  parsed_inputs = true;
+}
+
+void Rule::ParseInputs(Evaluator* ev) {
+  if (parsed_inputs) {
+    return;
+  }
+  if (second_expansion) {
+    Value* val = ParseExpr(&loc, prereq_string);
+    prereq_string = val->Eval(ev);
+  }
+  ParseInputs(prereq_string);
 }
 
 void Rule::ParsePrerequisites(const StringPiece& line,
@@ -46,19 +71,18 @@ void Rule::ParsePrerequisites(const StringPiece& line,
   //    target-prerequisites : prereq-patterns [ ; command ]
   // First, separate command. At this point separator_pos should point to ';'
   // unless null.
-  StringPiece prereq_string = line;
+  prereq_string = string(line.data(), line.size());
   if (separator_pos != string::npos &&
       rule_stmt->sep != RuleStmt::SEP_SEMICOLON) {
     CHECK(line[separator_pos] == ';');
     // TODO: Maybe better to avoid Intern here?
     cmds.push_back(Value::NewLiteral(
         Intern(TrimLeftSpace(line.substr(separator_pos + 1))).str()));
-    prereq_string = line.substr(0, separator_pos);
+    prereq_string = prereq_string.substr(0, separator_pos);
   }
 
   if ((separator_pos = prereq_string.find(':')) == string::npos) {
     // Simple prerequisites
-    ParseInputs(prereq_string);
     return;
   }
 
@@ -73,8 +97,7 @@ void Rule::ParsePrerequisites(const StringPiece& line,
     return;
   }
 
-  StringPiece target_prereq = prereq_string.substr(0, separator_pos);
-  StringPiece prereq_patterns = prereq_string.substr(separator_pos + 1);
+  string target_prereq = prereq_string.substr(0, separator_pos);
 
   for (StringPiece target_pattern : WordScanner(target_prereq)) {
     target_pattern = TrimLeadingCurdir(target_pattern);
@@ -87,6 +110,8 @@ void Rule::ParsePrerequisites(const StringPiece& line,
     output_patterns.push_back(Intern(target_pattern));
   }
 
+  prereq_string = prereq_string.substr(separator_pos + 1);
+
   if (output_patterns.empty()) {
     ERROR_LOC(loc, "*** missing target pattern.");
   }
@@ -96,7 +121,15 @@ void Rule::ParsePrerequisites(const StringPiece& line,
   if (!IsPatternRule(output_patterns[0].str())) {
     ERROR_LOC(loc, "*** target pattern contains no '%%'.");
   }
-  ParseInputs(prereq_patterns);
+}
+
+shared_ptr<Rule> Rule::ApplyPattern(Pattern pat, Symbol output) const {
+  shared_ptr<Rule> new_rule = make_shared<Rule>(*this);
+  string buf;
+  pat.AppendSubst(output.str(), prereq_string, &buf);
+  new_rule->prereq_string = buf;
+  new_rule->parsed_inputs = false;
+  return new_rule;
 }
 
 string Rule::DebugString() const {

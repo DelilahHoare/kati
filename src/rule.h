@@ -16,13 +16,16 @@
 #define RULE_H_
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
+#include "eval.h"
 #include "loc.h"
 #include "log.h"
 #include "stmt.h"
 #include "string_piece.h"
+#include "strutil.h"
 #include "symtab.h"
 
 using namespace std;
@@ -37,8 +40,6 @@ class Rule {
 
   string DebugString() const;
 
-  void ParseInputs(const StringPiece& inputs_string);
-
   void ParsePrerequisites(const StringPiece& line,
                           size_t pos,
                           const RuleStmt* rule_stmt);
@@ -47,6 +48,9 @@ class Rule {
     return target_string.find('%') != string::npos;
   }
 
+  void ParseInputs(Evaluator* ev);
+  shared_ptr<Rule> ApplyPattern(Pattern pat, Symbol output) const;
+
   vector<Symbol> outputs;
   vector<Symbol> inputs;
   vector<Symbol> order_only_inputs;
@@ -54,12 +58,16 @@ class Rule {
   vector<Symbol> validations;
   bool is_double_colon;
   bool is_suffix_rule;
+  bool second_expansion;
+  bool parsed_inputs;
   vector<Value*> cmds;
   Loc loc;
   int cmd_lineno;
+  string prereq_string;
 
  private:
   void Error(const string& msg) { ERROR_LOC(loc, "%s", msg.c_str()); }
+  void ParseInputs(const StringPiece& inputs_string);
 };
 
 #endif  // RULE_H_

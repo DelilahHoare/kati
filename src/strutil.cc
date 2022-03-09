@@ -161,7 +161,7 @@ StringPiece Pattern::Stem(StringPiece str) const {
   if (!Match(str))
     return "";
   return str.substr(percent_index_,
-                    str.size() - (pat_.size() - percent_index_ - 1));
+                    str.size() - pat_.size() + 1);
 }
 
 void Pattern::AppendSubst(StringPiece str,
@@ -178,17 +178,16 @@ void Pattern::AppendSubst(StringPiece str,
   }
 
   if (MatchImpl(str)) {
-    size_t subst_percent_index = subst.find('%');
-    if (subst_percent_index == string::npos) {
-      AppendString(subst, out);
-      return;
-    } else {
-      AppendString(subst.substr(0, subst_percent_index), out);
-      AppendString(str.substr(percent_index_, str.size() - pat_.size() + 1),
-                   out);
-      AppendString(subst.substr(subst_percent_index + 1), out);
-      return;
+    string subst_str = subst.as_string();
+    string stem = str.substr(percent_index_, str.size() - pat_.size() + 1).as_string();
+
+    size_t subst_percent_index = string::npos;
+    while ((subst_percent_index = subst_str.rfind('%', subst_percent_index - 1)) != string::npos) {
+      subst_str.replace(subst_percent_index, 1, stem);
     }
+
+    AppendString(subst_str, out);
+    return;
   }
   AppendString(str, out);
 }

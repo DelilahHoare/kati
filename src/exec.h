@@ -21,6 +21,6 @@ using namespace std;
 #include "dep.h"
 class Evaluator;
 
-void Exec(const vector<NamedDepNode>& roots, Evaluator* ev);
+bool Exec(const vector<NamedDepNode>& roots, Evaluator* ev, bool ignore_failure = false);
 
 #endif  // EXEC_H_

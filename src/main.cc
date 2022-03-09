@@ -44,6 +44,9 @@
 #include "timeutil.h"
 #include "var.h"
 
+char** argv_;
+char start_dir[1024];
+
 // We know that there are leaks in Kati. Turn off LeakSanitizer by default.
 extern "C" const char* __asan_default_options() {
   return "detect_leaks=0:allow_user_segv_handler=1";
@@ -101,10 +104,11 @@ static void ReadBootstrapMakefile(const vector<Symbol>& targets,
 static void SetVar(StringPiece l,
                    VarOrigin origin,
                    Frame* definition,
-                   Loc loc) {
+                   Loc loc,
+                   Symbol& lhs) {
   size_t found = l.find('=');
   CHECK(found != string::npos);
-  Symbol lhs = Intern(l.substr(0, found));
+  lhs = Intern(l.substr(0, found));
   StringPiece rhs = l.substr(found + 1);
   lhs.SetGlobalVar(new RecursiveVar(Value::NewLiteral(rhs.data()), origin,
                                     definition, loc, rhs.data()));
@@ -231,9 +235,13 @@ static int Run(const vector<Symbol>& targets,
       .SetGlobalVar(new SimpleVar(StringPrintf(" %s", g_flags.makefile),
                                   VarOrigin::FILE, ev.CurrentFrame(),
                                   ev.loc()));
+  vector<Symbol> envvars;
   for (char** p = environ; *p; p++) {
-    SetVar(*p, VarOrigin::ENVIRONMENT, nullptr, Loc());
+    Symbol lhs;
+    SetVar(*p, VarOrigin::ENVIRONMENT, nullptr, Loc(), lhs);
+    envvars.push_back(lhs);
   }
+  ev.ExportEnvVars(envvars);
   SegfaultHandler segfault(&ev);
 
   vector<Stmt*> bootstrap_asts;
@@ -282,6 +290,38 @@ static int Run(const vector<Symbol>& targets,
     ev.DumpIncludeJSON(std::string(g_flags.dump_include_graph));
   }
 
+  for (const auto& p : ev.exports()) {
+    const Symbol name = p.first;
+    if (p.second) {
+      Var* v = ev.LookupVar(name);
+      const string&& value = v->Eval(&ev);
+      LOG("setenv(%s, %s)", name.c_str(), value.c_str());
+      setenv(name.c_str(), value.c_str(), 1);
+    } else {
+      LOG("unsetenv(%s)", name.c_str());
+      unsetenv(name.c_str());
+    }
+  }
+
+  {
+    ScopedFrame frame(
+        ev.Enter(FrameType::PHASE, "*making makefiles*", Loc()));
+    ScopedTimeReporter tr("make makefiles time");
+    vector<NamedDepNode> nodes_makefiles, nodes_optional_makefiles;
+    MakeDep(&ev, ev.rules(), ev.rule_vars(), ev.makefiles(), &nodes_makefiles);
+    bool updated_makefiles = Exec(nodes_makefiles, &ev);
+    if (ev.optional_makefiles().size() != 0) {
+      MakeDep(&ev, ev.rules(), ev.rule_vars(), ev.optional_makefiles(), &nodes_optional_makefiles);
+      updated_makefiles |= Exec(nodes_optional_makefiles, &ev, true);
+    }
+    if (updated_makefiles) {
+      printf("\tStarting over.\n");
+      fflush(stdout);
+      chdir(start_dir);
+      execv(argv_[0], (char* const*)argv_);
+    }
+  }
+
   vector<NamedDepNode> nodes;
   {
     ScopedFrame frame(
@@ -300,19 +340,6 @@ static int Run(const vector<Symbol>& targets,
     ev.DumpStackStats();
     ev.Finish();
     return 0;
-  }
-
-  for (const auto& p : ev.exports()) {
-    const Symbol name = p.first;
-    if (p.second) {
-      Var* v = ev.LookupVar(name);
-      const string&& value = v->Eval(&ev);
-      LOG("setenv(%s, %s)", name.c_str(), value.c_str());
-      setenv(name.c_str(), value.c_str(), 1);
-    } else {
-      LOG("unsetenv(%s)", name.c_str());
-      unsetenv(name.c_str());
-    }
   }
 
   {
@@ -353,6 +380,7 @@ static void HandleRealpath(int argc, char** argv) {
 }
 
 int main(int argc, char* argv[]) {
+  getcwd(start_dir, sizeof(start_dir));
   if (argc >= 2 && !strcmp(argv[1], "--realpath")) {
     HandleRealpath(argc - 2, argv + 2);
     return 0;
