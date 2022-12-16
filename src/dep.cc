@@ -399,7 +399,7 @@ class DepBuilder {
  private:
   bool Exists(Symbol target) {
     return (rules_.find(target) != rules_.end()) || phony_.exists(target) ||
-           ::Exists(target.str());
+           ::Exists(target.str()) || BuildPlan(target, Intern(""))->has_rule;
   }
 
   bool GetRuleInputs(Symbol s, std::vector<Symbol>* o, Loc* l) {
@@ -556,6 +556,10 @@ class DepBuilder {
     for (Symbol output_pattern : rule->output_patterns) {
       Pattern pat(output_pattern.str());
       if (pat.Match(output.str())) {
+        if (std::find(rule_stack_.begin(), rule_stack_.end(), rule) !=
+            rule_stack_.end())
+          continue;
+        rule_stack_.push_back(rule);
         bool ok = true;
         for (Symbol input : rule->inputs) {
           std::string buf;
@@ -565,6 +569,7 @@ class DepBuilder {
             break;
           }
         }
+        rule_stack_.pop_back();
 
         if (ok) {
           matched = output_pattern;
@@ -942,6 +947,8 @@ class DepBuilder {
   Symbol symlink_outputs_var_name_;
   Symbol ninja_pool_var_name_;
   Symbol validations_var_name_;
+
+  std::vector<const Rule*> rule_stack_;
 };
 
 void MakeDep(Evaluator* ev,
