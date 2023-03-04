@@ -77,22 +77,21 @@ class Executor {
     }
 
     double latest = kProcessing;
+    bool phony_dep = false;
+
     for (auto const& d : n.order_onlys) {
-      if (Exists(d.second->output.str())) {
-        continue;
-      }
-      double ts = ExecNode(*d.second, n.output.c_str());
-      if (latest < ts)
-        latest = ts;
+      ExecNode(*d.second, n.output.c_str());
     }
 
     for (auto const& d : n.deps) {
       double ts = ExecNode(*d.second, n.output.c_str());
+      if (ts == kNotExist)
+        phony_dep = true;
       if (latest < ts)
         latest = ts;
     }
 
-    if (output_ts >= latest && !n.is_phony) {
+    if (output_ts >= latest && !n.is_phony && !phony_dep) {
       done_[n.output] = output_ts;
       return output_ts;
     }
